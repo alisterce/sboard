@@ -1,0 +1,109 @@
+#!/bin/bash
+
+# ============================================
+# SoundBoard для Linux (PulseAudio/PipeWire)
+# ============================================
+
+SCRIPT_NAME="soundboard"
+SOUNDS_DIR=""
+PLAYING_PID=""
+CURRENT_SINK=""
+
+setup_sounds_dir() {
+    if [ -n "$SOUNDS_DIR" ] && [ -d "$SOUNDS_DIR" ]; then return 0; fi
+    for dir in "$HOME/Музыка" "$HOME/Music" "$HOME/Звуки" "$HOME/Sounds"; do
+        if [ -d "$dir" ]; then SOUNDS_DIR="$dir"; return 0; fi
+    done
+    SOUNDS_DIR="$HOME/.local/share/soundboard/sounds"
+    mkdir -p "$SOUNDS_DIR"
+    return 0
+}
+
+setup_virtual_mic() {
+    if pactl list sinks short | grep -q "soundboard_virt"; then
+        CURRENT_SINK="soundboard_virt"
+        return 0
+    fi
+    if pactl load-module module-null-sink sink_name=soundboard_virt sink_properties=device.description="SoundBoard_Microphone" &>/dev/null; then
+        CURRENT_SINK="soundboard_virt"
+        return 0
+    else
+        return 1
+    fi
+}
+
+stop_playing() {
+    if [ -n "$PLAYING_PID" ] && kill -0 "$PLAYING_PID" 2>/dev/null; then
+        kill "$PLAYING_PID" 2>/dev/null
+    fi
+    PLAYING_PID=""
+}
+
+play_sound() {
+    local sound_file="$1"
+    if [ ! -f "$sound_file" ]; then return 1; fi
+    stop_playing
+    if command -v pw-play &>/dev/null && pactl info | grep -q "PipeWire"; then
+        pw-play --playback-device="$CURRENT_SINK" "$sound_file" &>/dev/null &
+        PLAYING_PID=$!
+    else
+        paplay --device="$CURRENT_SINK" "$sound_file" &>/dev/null &
+        PLAYING_PID=$!
+    fi
+}
+
+show_gui() {
+    local sound_files=()
+    while IFS= read -r file; do
+        sound_files+=("$(basename "$file")" "$file")
+    done < <(find "$SOUNDS_DIR" -type f \( -name "*.wav" -o -name "*.mp3" -o -name "*.ogg" \) 2>/dev/null)
+    
+    if [ ${#sound_files[@]} -eq 0 ]; then return 1; fi
+    
+    # Железобетонный цикл без моргания окна
+    while true; do
+        choice=$(yad --list --title="SoundBoard — Штурмовой режим" \
+            --width=450 --height=500 \
+            --column="Звук" --column="Полный путь" \
+            "${sound_files[@]}" \
+            --button="Воспроизвести:10" \
+            --button="Остановить:20" \
+            --button="Выход:1")
+        
+        ret=$?
+        selected=$(echo "$choice" | cut -d'|' -f2)
+        
+        case $ret in
+            10)
+                if [ -n "$selected" ]; then
+                    play_sound "$selected"
+                fi
+                ;;
+            20)
+                stop_playing
+                ;;
+            1|*)
+                disable_soundboard
+                exit 0
+                ;;
+        esac
+    done
+}
+
+disable_soundboard() {
+    stop_playing
+    if pactl list sinks short | grep -q "soundboard_virt"; then
+        local mod_id=$(pactl list sinks short | grep soundboard_virt | awk '{print $1}')
+        pactl unload-module "$mod_id" 2>/dev/null
+    fi
+    exit 0
+}
+
+main() {
+    setup_sounds_dir || exit 1
+    setup_virtual_mic || exit 1
+    trap disable_soundboard INT TERM
+    show_gui
+}
+
+main "$@"
